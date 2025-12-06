@@ -2,8 +2,11 @@ name: ci
 
 env:
   HOMEBREW_NO_INSTALL_CLEANUP: 1
-  FC: gfortran-12
   CTEST_NO_TESTS_ACTION: error
+  CTEST_PARALLEL_LEVEL: 0
+  CMAKE_INSTALL_PREFIX: ~/libs
+  CMAKE_PREFIX_PATH: ~/libs
+  CMAKE_GENERATOR: Ninja
 
 on:
   push:
@@ -14,45 +17,76 @@ on:
       - "**/CMakeLists.txt"
       - ".github/workflows/ci.yml"
       - "!scripts/**"
+  workflow_dispatch:
+
+# avoid wasted runs
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 
 jobs:
 
- fortran:
+  core:
     strategy:
       matrix:
-        shared: [true, false]
-        img: [ {os: ubuntu-latest, cmd: sudo apt update && sudo apt install --no-install-recommends libopenmpi-dev openmpi-bin},
-               {os: macos-latest, cmd: brew install open-mpi}
-        ]
+        shared: [false]
+        os: [ubuntu-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            shared: true
 
-    runs-on: ${{ matrix.img.os }}
-    timeout-minutes: 7
+
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
 
     steps:
 
-    - name: install prereqs
-      run: ${{ matrix.img.cmd }}
+    - &linux-prereq
+      name: install prereqs (Linux)
+      timeout-minutes: 15
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt update
+        sudo apt install --no-install-recommends libopenmpi-dev openmpi-bin liblapack-dev
 
-    - uses: actions/checkout@v4
+    - name: install prereqs (macOS)
+      timeout-minutes: 15
+      if: runner.os == 'macOS'
+      run: brew install open-mpi gcc
+
+    - &checkout
+      uses: actions/checkout@v4
 
     - name: Config
-      run: cmake -B build -DBUILD_SINGLE:BOOL=off -DBUILD_SHARED_LIBS:BOOL=${{ matrix.shared }} -DCMAKE_INSTALL_PREFIX:PATH=${{ runner.temp }}
+      run: cmake -B build -DBUILD_SINGLE:BOOL=off -DBUILD_SHARED_LIBS:BOOL=${{ matrix.shared }}
 
-    - name: build
-      run: cmake --build build --parallel
-
-    - name: test
-      run: ctest --test-dir build --preset default -V
+    - name: build / test
+      run: cmake --workflow default
 
     - name: install
       run: cmake --install build
 
     - name: example Config
-      run: cmake -S example -B example/build -DBUILD_SHARED_LIBS:BOOL=${{ matrix.shared }} -DCMAKE_PREFIX_PATH:PATH=${{ runner.temp }}
+      run: cmake -S example -B example/build -DBUILD_SHARED_LIBS:BOOL=${{ matrix.shared }}
 
     - name: build
-      run: cmake --build example/build --parallel
+      run: cmake --build example/build
 
     - name: test
-      run: ctest --test-dir example/build --preset default -V
+      run: ctest --test-dir example/build -V
+
+# test this project used as an archive in other projects
+  archive:
+    timeout-minutes: 15
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - *linux-prereq
+    - *checkout
+
+    - name: Test Scalapack as archive
+      run: cmake -S example/other_project -B build
+
+# if broken, the CMake configure step fails
